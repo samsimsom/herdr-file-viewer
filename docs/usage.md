@@ -40,6 +40,12 @@ reachable by keyboard with `H` / `L` when the tree is focused. A scrollbar appea
 more than fits. Narrow or widen the tree column with `<` / `>`, or drag the divider; the starting
 split, the tree's side, and a column cap are all [configurable](configuration.md).
 
+A **symlink to a directory** expands like any other directory, and `f` finds the files under it, as
+long as the link resolves **inside the root**. A link that points outside the root stays a leaf row:
+the viewer never lists or previews anything beyond the directory it was opened on. A symlinked
+directory is never folded into a [`compact_dirs`](configuration.md) chain, so a link back to an
+ancestor cannot run away.
+
 On a **deeply nested** layout the per-segment tree spends most of a narrow column on indentation, and
 the file names — the part you came for — are what gets truncated. Set
 [`compact_dirs = true`](configuration.md) to draw a chain of single-child directories as one row:

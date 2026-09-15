@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- A symlink to a directory inside the root is now a browsable directory (it was listed as a file you could not expand), and `f` finds the files under it. Links that resolve outside the root are still never followed. (#164) → [usage](docs/usage.md#the-tree)
+
 ## [1.17.0] - 2026-09-16
 
 ### Added

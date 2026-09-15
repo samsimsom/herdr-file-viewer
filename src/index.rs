@@ -40,6 +40,21 @@ pub(crate) fn walk_builder(root: &Path, is_git_repo: bool) -> WalkBuilder {
     builder
 }
 
+/// Whether `path` — an entry a walk found under `root` — is a symlink whose resolved target stays
+/// **inside** the canonical `root`: the one kind of symlink either walk follows (#164).
+///
+/// The containment rule is the one `render::classify` and `git::is_within_root` already apply to
+/// content reads (AC-N5), so the tree, the finder and the content pane agree on what is in bounds:
+/// a link into the repo is browsable, a link out of it (a data folder on another volume, `/`,
+/// `~/.ssh`) is never walked, and no name from beyond the root is listed. An unresolvable link
+/// (dangling, a loop the OS refuses) is not followed.
+pub(crate) fn is_in_root_symlink(root: &Path, path: &Path) -> bool {
+    let (Ok(target), Ok(root)) = (path.canonicalize(), root.canonicalize()) else {
+        return false;
+    };
+    target.starts_with(root)
+}
+
 /// Return every file under `root` as a root-relative `String`, respecting `.gitignore`.
 /// Equivalent to [`build_scoped`] with `is_git_repo = false` — kept for callers (and the
 /// existing test suite) that don't have a resolved git-repo flag to pass.
@@ -49,6 +64,8 @@ pub(crate) fn walk_builder(root: &Path, is_git_repo: bool) -> WalkBuilder {
 /// - The `.git` subtree is pruned entirely — AC-14.
 /// - Directories are not included, only files — AC-15.
 /// - Every returned path is relative to `root` (no leading `/`, no `..`) — AC-N5.
+/// - Symlinks are followed only when they resolve inside `root` ([`is_in_root_symlink`]); the
+///   walker's own loop detection drops a link back to an ancestor, so the walk stays bounded.
 /// - Each call performs a fresh walk; no cache — AC-18.
 /// - Works in non-git directories without error (`require_git(false)`) — AC-19.
 /// - Read-only: no filesystem or git mutations — AC-N1, AC-N2.
@@ -61,11 +78,17 @@ pub fn build(root: &Path) -> Vec<String> {
 /// an unrelated enclosing directory/repository above `root`.
 pub fn build_scoped(root: &Path, is_git_repo: bool) -> Vec<String> {
     let mut builder = walk_builder(root, is_git_repo);
+    let bound = root.to_path_buf();
     builder
         .hidden(false) // include dotfiles (AC-17 depends on the index NOT hiding dotfiles)
         .git_ignore(true)
         .git_exclude(true)
-        .filter_entry(|e| e.file_name() != ".git"); // prune entire .git subtree — AC-14
+        .follow_links(true) // #164: a symlinked directory's files are findable…
+        .filter_entry(move |e| {
+            e.file_name() != ".git" // prune entire .git subtree — AC-14
+                // …but only when the link stays inside the root (AC-N5).
+                && (!e.path_is_symlink() || is_in_root_symlink(&bound, e.path()))
+        });
 
     builder
         .build()

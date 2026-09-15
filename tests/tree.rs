@@ -321,3 +321,112 @@ fn reveal_returns_false_for_missing_or_above_root_path() {
         "cursor must be unchanged after above-root reveal"
     );
 }
+
+// ---- symlinked directories (#164) ------------------------------------------------------------
+//
+// A symlink is classified by what it resolves to, but ONLY when that target stays inside the
+// canonical root — the same containment rule `render::classify` and `git::is_within_root` already
+// apply (AC-N5). A symlink whose target escapes the root stays a non-browsable leaf, so expanding
+// it can never list names from outside the root. Creating a symlink without elevated privilege is
+// a unix assumption (Windows needs Developer Mode or admin), so these are unix-only.
+
+#[cfg(unix)]
+fn node<'a>(
+    nodes: &'a [herdr_file_viewer::tree::Node],
+    name: &str,
+) -> &'a herdr_file_viewer::tree::Node {
+    nodes
+        .iter()
+        .find(|n| n.path.file_name().is_some_and(|f| f == name))
+        .unwrap_or_else(|| panic!("node {name} present in {nodes:?}"))
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_directory_inside_the_root_is_a_browsable_directory() {
+    use herdr_file_viewer::tree::NodeKind;
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new();
+    fs::create_dir_all(dir.path().join("real")).unwrap();
+    fs::write(dir.path().join("real/note.md"), "hi").unwrap();
+    symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+
+    let mut model = TreeModel::new(dir.path());
+    assert_eq!(
+        node(&model.visible_nodes(), "link").kind,
+        NodeKind::Dir,
+        "a symlink resolving to an in-root directory must be a directory row (#164)"
+    );
+
+    let link = dir.path().join("link");
+    model.expand(&link);
+    let nodes = model.visible_nodes();
+    let child = nodes
+        .iter()
+        .find(|n| n.path == link.join("note.md"))
+        .unwrap_or_else(|| panic!("expanding the symlinked dir lists its child: {nodes:?}"));
+    assert_eq!(child.kind, NodeKind::File);
+    assert_eq!(child.depth, 1, "the child nests under the link row");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_directory_outside_the_root_is_never_browsed() {
+    use herdr_file_viewer::tree::NodeKind;
+    use std::os::unix::fs::symlink;
+    let root = TempDir::new();
+    let outside = TempDir::new();
+    fs::write(outside.path().join("secret.txt"), "s").unwrap();
+    symlink(outside.path(), root.path().join("escape")).unwrap();
+
+    let mut model = TreeModel::new(root.path());
+    assert_eq!(
+        node(&model.visible_nodes(), "escape").kind,
+        NodeKind::File,
+        "an out-of-root symlink stays a leaf, not an expandable directory (AC-N5)"
+    );
+    let escape = root.path().join("escape");
+    model.expand(&escape);
+    assert!(
+        model
+            .visible_nodes()
+            .iter()
+            .all(|n| n.path.file_name().is_none_or(|f| f != "secret.txt")),
+        "no name from outside the root may be listed (AC-N5)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_dirs_never_folds_through_a_symlink_loop() {
+    // `a/up -> ..` resolves to the root (in-root), and the root's only child is `a`: folding
+    // through the link would chain `a/up/a/up/…`, and folding FROM the link would draw its target
+    // as `up/a`. A symlinked directory neither continues nor starts a chain, so each row is one
+    // real entry and expanding adds exactly one level.
+    use herdr_file_viewer::tree::NodeKind;
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new();
+    fs::create_dir_all(dir.path().join("a")).unwrap();
+    symlink("..", dir.path().join("a/up")).unwrap();
+
+    let mut model = TreeModel::new(dir.path());
+    model.set_compact_dirs(true);
+    let nodes = model.visible_nodes();
+    assert_eq!(nodes.len(), 1, "one row at the top: {nodes:?}");
+    assert_eq!(nodes[0].path, dir.path().join("a"));
+    assert_eq!(nodes[0].label, None, "nothing folds through a symlink");
+
+    model.expand(&dir.path().join("a"));
+    let nodes = model.visible_nodes();
+    let up = node(&nodes, "up");
+    assert_eq!(up.kind, NodeKind::Dir);
+    assert_eq!(
+        up.label, None,
+        "a symlinked directory row does not start a chain"
+    );
+    assert_eq!(
+        nodes.len(),
+        2,
+        "expanding `a` adds exactly the link row: {nodes:?}"
+    );
+}

@@ -5,7 +5,7 @@
 //! its root — no node ever escapes it (AC-N5) — and reads only, never writes (AC-N1).
 
 use crate::git::Status;
-use crate::index::walk_builder;
+use crate::index::{is_in_root_symlink, walk_builder};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -518,7 +518,14 @@ impl TreeModel {
         let mut entries: Vec<(PathBuf, NodeKind)> = self
             .walk_children(dir)
             .map(|e| {
-                let kind = if e.file_type().is_some_and(|t| t.is_dir()) {
+                // The walk does not follow links, so a symlink's `file_type` is *symlink* — neither
+                // dir nor file. Classify it by its target, but only when that target stays inside
+                // the root (#164, AC-N5): an out-of-root link remains a leaf that is never listed.
+                let is_dir = e.file_type().is_some_and(|t| t.is_dir())
+                    || (e.path_is_symlink()
+                        && e.path().is_dir()
+                        && is_in_root_symlink(&self.root, e.path()));
+                let kind = if is_dir {
                     NodeKind::Dir
                 } else {
                     NodeKind::File
@@ -546,10 +553,22 @@ impl TreeModel {
         self.probe_reads.set(self.probe_reads.get() + 1);
         // Walk OUTSIDE the borrow: holding a `RefCell` borrow across a filesystem read is how a
         // future caller earns a panic.
+        // A symlinked directory never folds (#164): the walk follows a link it is ROOTED at, so
+        // without this `a/up -> ..` would fold into `up/a` and draw the link's target as part of a
+        // chain. Checked here rather than per row so the `lstat` is memoized with the answer.
+        if dir
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            self.folds.borrow_mut().insert(dir.to_path_buf(), None);
+            return None;
+        }
         let mut first_two = self.walk_children(dir).take(2);
         let fold = match (first_two.next(), first_two.next()) {
             // A lone subdirectory is the only thing a chain continues through; a file, a second
-            // entry, or an empty directory ends it.
+            // entry, or an empty directory ends it. So does a symlinked directory: its `file_type`
+            // is *symlink*, and folding through one could chase a link back to an ancestor
+            // (`a/up -> ..`) until the OS refused the path.
             (Some(only), None) if only.file_type().is_some_and(|t| t.is_dir()) => {
                 Some(only.into_path())
             }

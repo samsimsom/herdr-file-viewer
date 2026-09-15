@@ -178,3 +178,31 @@ fn filesystem_unchanged_after_build() {
         "build must not add/remove entries in root"
     );
 }
+
+// (i) #164: files under a symlinked directory are indexed when the link resolves inside the
+// root, and never when it escapes it (AC-N5) — the finder follows the same rule as the tree.
+#[cfg(unix)]
+#[test]
+fn follows_in_root_directory_symlinks_but_never_out_of_root_ones() {
+    use std::os::unix::fs::symlink;
+    let tmp = common::TempDir::new();
+    let outside = common::TempDir::new();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("real")).unwrap();
+    fs::write(root.join("real/note.md"), "").unwrap();
+    symlink(root.join("real"), root.join("link")).unwrap();
+    fs::write(outside.path().join("secret.txt"), "").unwrap();
+    symlink(outside.path(), root.join("escape")).unwrap();
+    // A loop back to the root must not make the walk unbounded.
+    symlink(".", root.join("real/loop")).unwrap();
+
+    let paths = index::build(root);
+    assert!(
+        paths.iter().any(|p| p == "link/note.md"),
+        "a file under an in-root symlinked dir is indexed: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p.contains("secret.txt")),
+        "nothing under an out-of-root symlink is indexed: {paths:?}"
+    );
+}
