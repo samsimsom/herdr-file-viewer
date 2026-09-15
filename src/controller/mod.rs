@@ -761,6 +761,9 @@ pub struct Controller {
     /// default `false`). A session preference carried across a re-root (like `show_ignored` /
     /// `hide_hidden`), so the new root's fresh tree is rebuilt with the same shape.
     compact_dirs: bool,
+    /// Whether symlinks resolving outside the root are followed (config `follow_symlinks`). A
+    /// session preference carried across a re-root, and the finder index reads it too.
+    follow_symlinks: bool,
     changed_only: bool,
     /// Which command a Diff/FullDiff render delegates to (`D`, cycling Delta →
     /// DeltaSideBySide → Raw). Carried
@@ -1052,6 +1055,7 @@ impl Controller {
             // Defaults ON, matching the resolver: a Controller built without config still guards.
             confirm_discard: true,
             compact_dirs: false,
+            follow_symlinks: false,
             tree_hscroll: 0,
             changed_only: false,
             diff_render_mode: DiffRenderMode::default(),
@@ -1264,6 +1268,7 @@ impl Controller {
         self.tree = TreeModel::new(resolved.root.clone());
         self.tree.set_is_git_repo(self.is_git_repo);
         self.tree.set_compact_dirs(self.compact_dirs); // a carried session preference (AC-12)
+        self.tree.set_follow_symlinks(self.follow_symlinks);
         // Recompute the cached branch for the new root's bottom-border title. Cheap and
         // synchronous: a single `git rev-parse` against the already-resolved repo root, done once
         // per re-root (not per-frame). `None` when the new root is outside a repo / detached.
@@ -1643,6 +1648,14 @@ impl Controller {
     pub fn apply_compact_dirs(&mut self, on: bool) {
         self.compact_dirs = on;
         self.tree.set_compact_dirs(on);
+    }
+
+    /// Apply the config-driven `follow_symlinks` opt-in: follow a symlink under the root even when
+    /// it resolves outside it, in the tree and in the finder index. Called once by `app::run`
+    /// before the first draw and re-applied on a re-root.
+    pub fn apply_follow_symlinks(&mut self, on: bool) {
+        self.follow_symlinks = on;
+        self.tree.set_follow_symlinks(on);
     }
 
     /// Apply a launch **open target** once at startup: resolve `path` under the tree **root**,

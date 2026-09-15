@@ -82,6 +82,15 @@
 # toggles it. Default:
 #compact_dirs = false
 
+# Follow a symlink that lives inside the root even when it points OUTSIDE it --
+# e.g. a `data -> ~/Drive/project-data` folder kept beside the repo. Off, only
+# links that resolve inside the root expand, and nothing beyond the root is
+# listed or read. On, such a link expands, `f` finds the files under it, and
+# its files preview; paths are still shown under the link. Only turn it on for
+# roots you trust: a hostile repo could point a link at `~/.ssh` or `/`.
+# A startup setting -- no runtime key toggles it. Default:
+#follow_symlinks = false
+
 # Choose the automatic initial view for Git-changed files. "diff" preserves the
 # default diff-first behavior. "content" applies the normal file-type policy
 # instead: Markdown opens rendered, while source/text opens in syntax content.

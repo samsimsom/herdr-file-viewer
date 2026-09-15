@@ -430,3 +430,40 @@ fn compact_dirs_never_folds_through_a_symlink_loop() {
         "expanding `a` adds exactly the link row: {nodes:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_browses_a_link_whose_target_is_outside_the_root() {
+    // The opt-in (`follow_symlinks = true`): a link that LIVES inside the root is followed even when
+    // it resolves elsewhere — the `<name>-data -> ~/Drive/…` layout #164 was filed for.
+    use herdr_file_viewer::tree::NodeKind;
+    use std::os::unix::fs::symlink;
+    let root = TempDir::new();
+    let outside = TempDir::new();
+    fs::write(outside.path().join("note.md"), "n").unwrap();
+    symlink(outside.path(), root.path().join("data")).unwrap();
+
+    let mut model = TreeModel::new(root.path());
+    model.set_follow_symlinks(true);
+    assert_eq!(node(&model.visible_nodes(), "data").kind, NodeKind::Dir);
+    let data = root.path().join("data");
+    model.expand(&data);
+    let nodes = model.visible_nodes();
+    let child = node(&nodes, "note.md");
+    assert_eq!(
+        child.path,
+        data.join("note.md"),
+        "listed under the link, not the target"
+    );
+    assert!(
+        nodes.iter().all(|n| n.path.starts_with(root.path())),
+        "every row keeps a path under the root: {nodes:?}"
+    );
+
+    model.set_follow_symlinks(false);
+    assert_eq!(
+        node(&model.visible_nodes(), "data").kind,
+        NodeKind::File,
+        "off again: the out-of-root link is a leaf"
+    );
+}

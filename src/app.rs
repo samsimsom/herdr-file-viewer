@@ -66,6 +66,7 @@ pub fn run(open_flag: Option<String>) -> io::Result<()> {
     // The Content Renderer size caps (config `preview_max_lines` / `preview_max_kib`, already clamped
     // and byte-converted). `Copy`, so the factory closure below captures it by value.
     let caps = eff.preview_caps();
+    let follow_symlinks = eff.follow_symlinks;
 
     // The root-bound providers are built by a factory so a later re-root rebuilds them against
     // the new root (ADR-0004). Non-capturing — it reads the passed `Resolved`, so re-root gets
@@ -86,6 +87,7 @@ pub fn run(open_flag: Option<String>) -> io::Result<()> {
                 root: resolved.root.clone(),
                 renderers: factory_renderers.clone(),
                 caps,
+                follow_symlinks,
             });
             RootProviders { git, content }
         });
@@ -127,6 +129,8 @@ pub fn run(open_flag: Option<String>) -> io::Result<()> {
     // Apply the config-driven tree shape (`compact_dirs`): fold a chain of single-child
     // directories into one row. A startup setting — there is no runtime toggle for it.
     controller.apply_compact_dirs(eff.compact_dirs);
+    // Apply the config-driven `follow_symlinks` opt-in to the tree and the finder index.
+    controller.apply_follow_symlinks(eff.follow_symlinks);
     // Apply the config-driven quit guard (`confirm_discard`): whether quitting with
     // session annotations held confirms first or discards them immediately.
     controller.apply_confirm_discard(eff.confirm_discard);
@@ -492,6 +496,8 @@ struct LiveContent {
     /// The size caps (line + byte) for classifying/previewing content, resolved from config
     /// (`preview_max_lines` / `preview_max_kib`) at startup. `Copy`.
     caps: Caps,
+    /// Read through symlinks that resolve outside the root (config `follow_symlinks`).
+    follow_symlinks: bool,
 }
 
 impl ContentProvider for LiveContent {
@@ -516,7 +522,7 @@ impl ContentProvider for LiveContent {
         let prepared = if matches!(mode, ViewMode::Diff | ViewMode::FullDiff) {
             Prepared::Binary
         } else {
-            render::classify(&self.root, path, self.caps)
+            render::classify_following(&self.root, path, self.caps, self.follow_symlinks)
         };
         let name = path.file_name().and_then(OsStr::to_str);
         // Retain the raw source lines behind a source-mapped render: `SyntaxContent` displays one
@@ -1459,6 +1465,7 @@ mod tests {
                 timeout: Duration::from_secs(5),
             },
             caps: Caps::default(),
+            follow_symlinks: false,
         }
     }
 
@@ -1485,6 +1492,7 @@ mod tests {
                 max_lines: 50,
                 max_bytes: 1024 * 1024,
             },
+            follow_symlinks: false,
         };
         let out = content.render_at_width(
             &file,

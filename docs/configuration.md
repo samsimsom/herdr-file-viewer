@@ -47,7 +47,7 @@ A config key always wins. Only two keys also have an environment-variable fallba
 config key and above the built-in default — `editor` (`$EDITOR`) and `update_check`
 (`$HERDR_FILE_VIEWER_NO_UPDATE_CHECK`) — giving those two a `config > env > default` chain. Every
 other key (`markdown`, `diff`, `syntax`, `open`, `reveal`, `hide_dotfiles`, `show_ignored`,
-`compact_dirs`, `changed_file_view`, `baseline`, `confirm_discard`, `scroll_lines`, `tree_width`,
+`compact_dirs`, `follow_symlinks`, `changed_file_view`, `baseline`, `confirm_discard`, `scroll_lines`, `tree_width`,
 `tree_position`, `tree_max_cols`, `open_direction`, `preview_max_lines`, `preview_max_kib`) has no
 applicable environment variable; for those it's `config > default` only.
 
@@ -68,6 +68,7 @@ reveal = "nautilus"
 hide_dotfiles = false       # true to hide dotfiles at startup (the `.` key still toggles)
 show_ignored = false        # true to show gitignored files at startup (the `i` key still toggles)
 compact_dirs = false        # true to draw a chain of single-child dirs as ONE row (src/main/java)
+follow_symlinks = false     # true to browse symlinks that point outside the root (trusted roots only)
 changed_file_view = "diff"  # changed files start in "diff", or use normal "content" by file type
 baseline = "base"           # force startup diff baseline: "base" or "head" (omit for context-smart default)
 update_check = true         # false disables all remote requests and their display
@@ -134,6 +135,14 @@ either to view bigger files (`preview_max_lines` up to `100000`, `preview_max_ki
 One caveat for **diffs**: a diff is additionally bounded at ~4 MB by the git-capture step, independent
 of `preview_max_kib`. So raising `preview_max_kib` above ~4 MB widens how much *file content* is shown
 but not how much of a very large *diff* is (a diff past that bound is shown up to ~4 MB).
+
+`follow_symlinks` widens what the viewer reads. By default a symlink to a directory expands only when it
+resolves **inside** the root, and a link that points elsewhere stays a leaf row whose contents are never
+listed or read. With it on, a link that lives inside the root is followed wherever it points: it
+expands, `f` indexes the files under it, and those files preview. Rows keep the link's path
+(`data/notes.md`), a `..` path is still refused, and a symlinked directory still never folds into a
+`compact_dirs` chain. Keep it off for roots you do not trust — a hostile repository can point a link
+at `~/.ssh`.
 
 `compact_dirs` changes the tree's **shape**, not what it shows. With it on, a chain of directories
 that each hold nothing but one subdirectory is drawn as a single row — `src/main/java/br/com` instead

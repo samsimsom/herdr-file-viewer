@@ -160,6 +160,9 @@ pub struct TreeModel {
     /// Draw a chain of single-child directories as one row (`src/main/java`) instead of one row
     /// per segment. Off by default; seeded once at startup from the `compact_dirs` config key.
     compact_dirs: bool,
+    /// Follow a symlink that lives under the root even when it resolves outside it (the
+    /// `follow_symlinks` config key). Off by default: only in-root links are browsable (AC-N5).
+    follow_symlinks: bool,
     /// Memoized [`probe_fold`](Self::probe_fold) results, one per directory probed — **the whole
     /// price of compaction**, and deliberately the fold SHAPE rather than any directory's contents.
     ///
@@ -205,6 +208,7 @@ impl TreeModel {
             is_git_repo: false,
             changed_only: false,
             compact_dirs: false,
+            follow_symlinks: false,
             folds: RefCell::new(HashMap::new()),
             full_reads: Cell::new(0),
             probe_reads: Cell::new(0),
@@ -219,6 +223,14 @@ impl TreeModel {
     /// A startup setting, not a runtime toggle: it changes the tree's shape, not what it shows.
     pub fn set_compact_dirs(&mut self, on: bool) {
         self.compact_dirs = on;
+        self.invalidate_compaction();
+        self.clamp_cursor();
+    }
+
+    /// Follow symlinks that resolve outside the root (the `follow_symlinks` config key). A startup
+    /// setting like `compact_dirs`; re-applied by the controller on a re-root.
+    pub fn set_follow_symlinks(&mut self, on: bool) {
+        self.follow_symlinks = on;
         self.invalidate_compaction();
         self.clamp_cursor();
     }
@@ -252,7 +264,13 @@ impl TreeModel {
                 .canonicalize()
                 .unwrap_or_else(|_| self.root.clone())
         });
-        let verdict = path.is_dir() && is_within_canonical_root(canon_root, path);
+        // `follow_symlinks` admits any resolvable link; otherwise only one that stays in the root.
+        let verdict = path.is_dir()
+            && if self.follow_symlinks {
+                path.canonicalize().is_ok()
+            } else {
+                is_within_canonical_root(canon_root, path)
+            };
         self.symlink_dirs
             .borrow_mut()
             .insert(path.to_path_buf(), verdict);

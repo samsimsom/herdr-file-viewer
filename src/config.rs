@@ -157,6 +157,10 @@ pub struct Config {
     /// turning on for a deeply-nested layout (a Java/Maven `src/main/java/...`, a nested monorepo),
     /// where the per-segment tree spends most of the column on indentation.
     pub compact_dirs: Option<bool>,
+    /// Whether a symlink that lives under the root is followed even when it resolves OUTSIDE the
+    /// root (a data folder on another volume). `None` falls back to `false`: only links that stay
+    /// inside the root are browsable (AC-N5). The listed path stays under the link either way.
+    pub follow_symlinks: Option<bool>,
     /// The automatic initial view for Git-changed files: `"diff"` (the default) or `"content"`
     /// (apply the normal file-type policy to paths that still exist: rendered Markdown, syntax
     /// content otherwise). Deleted paths remain diff-first. A lenient string resolved by
@@ -338,6 +342,9 @@ pub struct EffectiveSettings {
     /// The effective **compact directory chains** switch: the config `compact_dirs` when present,
     /// else `false`. Seeds the tree at startup. Config-or-default (no env var).
     pub compact_dirs: bool,
+    /// The effective **follow out-of-root symlinks** switch: the config `follow_symlinks` when
+    /// present, else `false`. Seeds the tree, the finder index and the content reader at startup.
+    pub follow_symlinks: bool,
     /// The effective automatic view policy for Git-changed files. Config `"content"` selects the
     /// normal file-type view; absent, invalid, or `"diff"` preserves the original diff-first
     /// behavior. Config-or-default (no env var).
@@ -431,6 +438,10 @@ pub fn resolve(config: &Config, get_env: impl Fn(&str) -> Option<String>) -> Eff
     // does not ask for it: compaction is a real trade (fewer rows and far less indentation, but a
     // row no longer maps 1:1 to a directory), and which side wins depends on how deep the repo is.
     let compact_dirs = config.compact_dirs.unwrap_or(false);
+
+    // Config > default; no env var. Defaults OFF: following a link out of the root widens what the
+    // viewer reads beyond the directory it was opened on, so it is never a surprise (SECURITY.md).
+    let follow_symlinks = config.follow_symlinks.unwrap_or(false);
 
     // Config > default; no env var. Lenient string match (trimmed, case-insensitive): only
     // `content` bypasses the changed-file diff preference. Anything else preserves the original
@@ -549,6 +560,7 @@ pub fn resolve(config: &Config, get_env: impl Fn(&str) -> Option<String>) -> Eff
         hide_dotfiles,
         show_ignored,
         compact_dirs,
+        follow_symlinks,
         changed_file_view,
         baseline,
         update_check,

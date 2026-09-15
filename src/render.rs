@@ -127,6 +127,14 @@ pub enum Prepared {
 /// (AC-N5), and a FIFO/device/dir is never opened (no hang, no garbage). Such paths return an
 /// [`Prepared::Unavailable`] placeholder explaining why no preview is available.
 pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
+    classify_following(root, path, caps, false)
+}
+
+/// [`classify`], with the `follow_symlinks` opt-in. When `true`, a path that lies **lexically**
+/// under `root` (no `..`, not above it) is read even when a symlink along it resolves outside the
+/// root — the tree only ever hands out such paths for links the user opted to follow. A `..` path
+/// and a non-regular target are refused exactly as before.
+pub fn classify_following(root: &Path, path: &Path, caps: Caps, follow_symlinks: bool) -> Prepared {
     let Ok(canon_root) = root.canonicalize() else {
         return Prepared::Unavailable {
             reason: UnavailableReason::Missing,
@@ -153,7 +161,12 @@ pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
             return Prepared::Unavailable { reason };
         }
     };
-    if !canonical.starts_with(&canon_root) {
+    let lexically_within = path.starts_with(root)
+        && !path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+    let admitted = canonical.starts_with(&canon_root) || (follow_symlinks && lexically_within);
+    if !admitted {
         return Prepared::Unavailable {
             reason: UnavailableReason::OutsideViewedRoot,
         }; // escapes the root (AC-N5)
@@ -1022,6 +1035,45 @@ mod tests {
         );
         fs::remove_dir_all(&root).ok();
         fs::remove_file(&outside).ok();
+    }
+
+    // `follow_symlinks = true`: a path that lies LEXICALLY under the root through a symlink is read
+    // even though its target is elsewhere; a `..` escape and a non-regular target stay refused.
+    #[cfg(unix)]
+    #[test]
+    fn follow_symlinks_reads_through_an_in_root_link_to_an_outside_target() {
+        use std::os::unix::fs::symlink;
+        let root = unique_dir("root");
+        let outside = unique_dir("outside");
+        fs::write(outside.join("note.md"), "from the data folder").unwrap();
+        symlink(&outside, root.join("data")).unwrap();
+        let through = root.join("data/note.md");
+
+        assert_eq!(
+            classify(&root, &through, Caps::default()),
+            Prepared::Binary,
+            "default stays AC-N5"
+        );
+        match classify_following(&root, &through, Caps::default(), true) {
+            Prepared::Full { text } => assert!(text.contains("from the data folder")),
+            other => panic!("expected Full, got {other:?}"),
+        }
+        let dotdot = root
+            .join("data/../../")
+            .join(outside.file_name().unwrap())
+            .join("note.md");
+        assert_eq!(
+            classify_following(&root, &dotdot, Caps::default(), true),
+            Prepared::Binary,
+            "a `..` path is never admitted"
+        );
+        assert_eq!(
+            classify_following(&root, &root.join("data"), Caps::default(), true),
+            Prepared::Binary,
+            "a directory is still not a regular file"
+        );
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 
     #[cfg(unix)]

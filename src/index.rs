@@ -60,6 +60,18 @@ pub(crate) fn is_within_canonical_root(canon_root: &Path, path: &Path) -> bool {
         .is_ok_and(|target| target.starts_with(canon_root))
 }
 
+/// Whether a walk under `root` may follow the symlink at `path`: always when the link resolves inside
+/// the root ([`is_in_root_symlink`]); with the opt-in `follow_symlinks` config key, also when it
+/// resolves anywhere at all. The link itself still lives under the root, so every listed path stays
+/// root-relative — only the bytes behind it come from elsewhere. A dangling link is never followed.
+pub(crate) fn may_follow_symlink(root: &Path, path: &Path, follow_symlinks: bool) -> bool {
+    if follow_symlinks {
+        path.canonicalize().is_ok()
+    } else {
+        is_in_root_symlink(root, path)
+    }
+}
+
 /// Return every file under `root` as a root-relative `String`, respecting `.gitignore`.
 /// Equivalent to [`build_scoped`] with `is_git_repo = false` — kept for callers (and the
 /// existing test suite) that don't have a resolved git-repo flag to pass.
@@ -75,13 +87,29 @@ pub(crate) fn is_within_canonical_root(canon_root: &Path, path: &Path) -> bool {
 /// - Works in non-git directories without error (`require_git(false)`) — AC-19.
 /// - Read-only: no filesystem or git mutations — AC-N1, AC-N2.
 pub fn build(root: &Path) -> Vec<String> {
-    build_scoped(root, false)
+    build_scoped_following(root, false, false)
 }
 
 /// Like [`build`], but bounds the ancestor `.gitignore` search at `root`'s own repository
 /// boundary when `is_git_repo` is true (see [`walk_builder`]) instead of letting it climb past
 /// an unrelated enclosing directory/repository above `root`.
 pub fn build_scoped(root: &Path, is_git_repo: bool) -> Vec<String> {
+    build_scoped_following(root, is_git_repo, false)
+}
+
+/// [`build`], with the `follow_symlinks` opt-in: when `true`, a symlink under `root` is followed
+/// wherever it resolves ([`may_follow_symlink`]). Paths are still reported under the link.
+pub fn build_following(root: &Path, follow_symlinks: bool) -> Vec<String> {
+    build_scoped_following(root, false, follow_symlinks)
+}
+
+/// [`build_scoped`] and [`build_following`] in one: the repo-boundary flag and the
+/// `follow_symlinks` opt-in are independent, and the finder passes both.
+pub fn build_scoped_following(
+    root: &Path,
+    is_git_repo: bool,
+    follow_symlinks: bool,
+) -> Vec<String> {
     let mut builder = walk_builder(root, is_git_repo);
     let bound = root.to_path_buf();
     builder
@@ -91,8 +119,8 @@ pub fn build_scoped(root: &Path, is_git_repo: bool) -> Vec<String> {
         .follow_links(true) // #164: a symlinked directory's files are findable…
         .filter_entry(move |e| {
             e.file_name() != ".git" // prune entire .git subtree — AC-14
-                // …but only when the link stays inside the root (AC-N5).
-                && (!e.path_is_symlink() || is_in_root_symlink(&bound, e.path()))
+                // …but only when the link stays inside the root (AC-N5), unless opted out.
+                && (!e.path_is_symlink() || may_follow_symlink(&bound, e.path(), follow_symlinks))
         });
 
     builder

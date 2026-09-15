@@ -206,3 +206,32 @@ fn follows_in_root_directory_symlinks_but_never_out_of_root_ones() {
         "nothing under an out-of-root symlink is indexed: {paths:?}"
     );
 }
+
+// (j) `follow_symlinks = true`: files under an out-of-root link are indexed under the LINK's path,
+// and a loop back to an ancestor still does not make the walk unbounded.
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_indexes_out_of_root_links_under_the_link_path() {
+    use std::os::unix::fs::symlink;
+    let tmp = common::TempDir::new();
+    let outside = common::TempDir::new();
+    let root = tmp.path();
+    fs::create_dir_all(outside.path().join("sub")).unwrap();
+    fs::write(outside.path().join("sub/note.md"), "").unwrap();
+    symlink(outside.path(), root.join("data")).unwrap();
+    symlink(outside.path(), outside.path().join("sub/loop")).unwrap();
+
+    assert!(
+        !index::build(root).iter().any(|p| p.starts_with("data/")),
+        "default: out-of-root link not followed"
+    );
+    let paths = index::build_following(root, true);
+    assert!(
+        paths.iter().any(|p| p == "data/sub/note.md"),
+        "followed: {paths:?}"
+    );
+    assert!(
+        paths.iter().all(|p| !p.contains("loop/")),
+        "a loop is not descended: {paths:?}"
+    );
+}
