@@ -380,17 +380,20 @@ pub struct HelpView {
 /// `●` so the "dirty directory" state is distinguishable with color stripped — previously it was
 /// color-only (LightRed) and lost to a colorblind user or a non-default theme. A clean directory
 /// and a clean file both show a blank, so the column stays aligned across clean and dirty rows.
+///
+/// A directory row can also carry its **own** status when git tracks the path itself — a symlink to
+/// a directory (#164) or a submodule. It shows that letter unless changes below it already make it
+/// dirty, so a file-replaced-by-directory row in changed-only mode keeps its `●`.
 fn status_marker(node: &Node) -> char {
-    match node.kind {
-        NodeKind::Dir if node.dir_dirty => '●',
-        NodeKind::File => match node.status {
-            Some(Status::Modified) => 'M',
-            Some(Status::Added) => 'A',
-            Some(Status::Deleted) => 'D',
-            Some(Status::Untracked) => '?',
-            None => ' ',
-        },
-        _ => ' ',
+    if node.kind == NodeKind::Dir && node.dir_dirty {
+        return '●';
+    }
+    match node.status {
+        Some(Status::Modified) => 'M',
+        Some(Status::Added) => 'A',
+        Some(Status::Deleted) => 'D',
+        Some(Status::Untracked) => '?',
+        None => ' ',
     }
 }
 
@@ -457,13 +460,15 @@ fn truncate_middle(s: &str, area_width: u16) -> String {
 /// (added / untracked) light green, and a directory containing any change is light red.
 /// Clean rows take the default foreground.
 fn row_color(node: &Node) -> Option<Color> {
-    match node.kind {
-        NodeKind::Dir => node.dir_dirty.then_some(Color::LightRed),
-        NodeKind::File => match node.status {
-            Some(Status::Modified | Status::Deleted) => Some(Color::LightRed),
-            Some(Status::Added | Status::Untracked) => Some(Color::LightGreen),
-            None => None,
-        },
+    // A directory with changes below is red; otherwise a row takes its own status color, which a
+    // directory row has only when git tracks the path itself (a symlink, #164; a submodule).
+    if node.kind == NodeKind::Dir && node.dir_dirty {
+        return Some(Color::LightRed);
+    }
+    match node.status {
+        Some(Status::Modified | Status::Deleted) => Some(Color::LightRed),
+        Some(Status::Added | Status::Untracked) => Some(Color::LightGreen),
+        None => None,
     }
 }
 
@@ -2859,6 +2864,36 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, help: &HelpView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dir_row(status: Option<Status>, dir_dirty: bool) -> Node {
+        Node {
+            path: std::path::PathBuf::from("data"),
+            kind: NodeKind::Dir,
+            depth: 0,
+            expanded: false,
+            status,
+            dir_dirty,
+            label: None,
+        }
+    }
+
+    // #164: a symlink to a directory is a Dir row, but git tracks the LINK itself, so the row can
+    // carry its own status. It must still show that status rather than a blank clean row.
+    #[test]
+    fn a_directory_row_with_its_own_status_shows_it_unless_it_is_dirty_below() {
+        let changed_link = dir_row(Some(Status::Modified), false);
+        assert_eq!(status_marker(&changed_link), 'M');
+        assert_eq!(row_color(&changed_link), Some(Color::LightRed));
+        let untracked_link = dir_row(Some(Status::Untracked), false);
+        assert_eq!(status_marker(&untracked_link), '?');
+        assert_eq!(row_color(&untracked_link), Some(Color::LightGreen));
+        // A directory with changes below keeps the aggregate marker (e.g. a file replaced by a
+        // directory of the same name in changed-only mode), and a clean one stays blank.
+        assert_eq!(status_marker(&dir_row(Some(Status::Deleted), true)), '●');
+        assert_eq!(status_marker(&dir_row(None, true)), '●');
+        assert_eq!(status_marker(&dir_row(None, false)), ' ');
+        assert_eq!(row_color(&dir_row(None, false)), None);
+    }
 
     /// Flatten a line's spans to plain text (drops styling) so a test can read the result of
     /// `patch_char_range` back as a string.

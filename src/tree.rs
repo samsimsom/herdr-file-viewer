@@ -5,8 +5,8 @@
 //! its root — no node ever escapes it (AC-N5) — and reads only, never writes (AC-N1).
 
 use crate::git::Status;
-use crate::index::{is_in_root_symlink, walk_builder};
-use std::cell::{Cell, RefCell};
+use crate::index::{is_within_canonical_root, walk_builder};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -103,9 +103,13 @@ pub fn cmp_file_rows(a: &Path, b: &Path) -> Ordering {
 /// directory set — so changed-only mode emits a `Dir` row AND a `File` row for it, the directory
 /// first. A path-only lookup would land the jump on the directory row and never show the file's
 /// diff.
+///
+/// The one exception is a **symlink** to a directory (#164): git tracks the link itself, so it is a
+/// changed path, but the full tree draws it as a directory row. Such a row is the link's only row,
+/// so it matches whatever its kind. The `is_symlink` stat runs only for a same-path non-file row.
 fn file_row(rows: &[Node], path: &Path) -> Option<usize> {
     rows.iter()
-        .position(|n| n.path == path && n.kind == NodeKind::File)
+        .position(|n| n.path == path && (n.kind == NodeKind::File || path.is_symlink()))
 }
 
 /// A directory's **foldability**: its sole visible child directory, when that single subdirectory
@@ -173,6 +177,15 @@ pub struct TreeModel {
     /// [`walk_counts`](Self::walk_counts); the walk-discipline tests assert the deltas.
     full_reads: Cell<usize>,
     probe_reads: Cell<usize>,
+    /// The root, canonicalized once on first use, for symlink containment checks (#164). A tree
+    /// never changes root — a re-root builds a new one — so this can never go stale.
+    canon_root: OnceCell<PathBuf>,
+    /// Memoized verdict per symlink entry: whether it is a browsable directory (#164). The full
+    /// listing runs on every frame, and without this every symlink row would cost a stat and a
+    /// `canonicalize` per frame — on a cloud-storage volume, a round trip each. Cleared with the fold
+    /// shapes by [`invalidate_compaction`](Self::invalidate_compaction), so a retargeted link is
+    /// re-read at the same refresh points a fold shape is.
+    symlink_dirs: RefCell<HashMap<PathBuf, bool>>,
     /// Per-file status for tree markers (AC-7), keyed by root-relative path. Set
     /// independently of the filter (`set_status`) so the two can never overwrite each
     /// other.
@@ -195,6 +208,8 @@ impl TreeModel {
             folds: RefCell::new(HashMap::new()),
             full_reads: Cell::new(0),
             probe_reads: Cell::new(0),
+            canon_root: OnceCell::new(),
+            symlink_dirs: RefCell::new(HashMap::new()),
             markers: BTreeMap::new(),
             changed_filter: BTreeMap::new(),
         }
@@ -208,8 +223,9 @@ impl TreeModel {
         self.clamp_cursor();
     }
 
-    /// Drop the memoized fold shapes so the next build re-probes the filesystem — the tree's "the
-    /// world may have moved" hook, and a no-op with `compact_dirs` off (nothing is cached).
+    /// Drop the memoized fold shapes and symlink verdicts so the next build re-probes the
+    /// filesystem — the tree's "the world may have moved" hook. With `compact_dirs` off and no
+    /// symlinks in view there is nothing cached, and it is a no-op.
     ///
     /// Called from every point that changes what a probe would see: the display filters below,
     /// [`reveal`](Self::reveal) (which relaxes them directly, and re-probes so it never decides
@@ -221,6 +237,26 @@ impl TreeModel {
     /// the tree was going to take anyway. There is no walk storm to schedule around.
     pub fn invalidate_compaction(&mut self) {
         self.folds.get_mut().clear();
+        self.symlink_dirs.get_mut().clear();
+    }
+
+    /// Whether the symlink at `path` is a browsable directory: it resolves to a directory inside the
+    /// canonical root (#164, AC-N5). Memoized in [`symlink_dirs`](Self::symlink_dirs).
+    fn symlink_is_browsable_dir(&self, path: &Path) -> bool {
+        let cached = self.symlink_dirs.borrow().get(path).copied();
+        if let Some(hit) = cached {
+            return hit;
+        }
+        let canon_root = self.canon_root.get_or_init(|| {
+            self.root
+                .canonicalize()
+                .unwrap_or_else(|_| self.root.clone())
+        });
+        let verdict = path.is_dir() && is_within_canonical_root(canon_root, path);
+        self.symlink_dirs
+            .borrow_mut()
+            .insert(path.to_path_buf(), verdict);
+        verdict
     }
 
     /// Every filesystem read this tree has made, as `(full listings, foldability probes)`.
@@ -522,9 +558,7 @@ impl TreeModel {
                 // dir nor file. Classify it by its target, but only when that target stays inside
                 // the root (#164, AC-N5): an out-of-root link remains a leaf that is never listed.
                 let is_dir = e.file_type().is_some_and(|t| t.is_dir())
-                    || (e.path_is_symlink()
-                        && e.path().is_dir()
-                        && is_in_root_symlink(&self.root, e.path()));
+                    || (e.path_is_symlink() && self.symlink_is_browsable_dir(e.path()));
                 let kind = if is_dir {
                     NodeKind::Dir
                 } else {
@@ -551,8 +585,6 @@ impl TreeModel {
             return hit.clone();
         }
         self.probe_reads.set(self.probe_reads.get() + 1);
-        // Walk OUTSIDE the borrow: holding a `RefCell` borrow across a filesystem read is how a
-        // future caller earns a panic.
         // A symlinked directory never folds (#164): the walk follows a link it is ROOTED at, so
         // without this `a/up -> ..` would fold into `up/a` and draw the link's target as part of a
         // chain. Checked here rather than per row so the `lstat` is memoized with the answer.
@@ -563,6 +595,8 @@ impl TreeModel {
             self.folds.borrow_mut().insert(dir.to_path_buf(), None);
             return None;
         }
+        // Walk OUTSIDE the borrow: holding a `RefCell` borrow across a filesystem read is how a
+        // future caller earns a panic.
         let mut first_two = self.walk_children(dir).take(2);
         let fold = match (first_two.next(), first_two.next()) {
             // A lone subdirectory is the only thing a chain continues through; a file, a second
@@ -803,8 +837,9 @@ impl TreeModel {
             }
             // No file on disk (a deletion, or a path now taken by a directory) can gain a row
             // outside changed-only mode, which the lookup above already covers. Skipping on a
-            // cheap `stat` keeps a run of deleted candidates off the walk path entirely.
-            if !abs.is_file() {
+            // cheap `stat` keeps a run of deleted candidates off the walk path entirely. A symlink
+            // is kept: git tracks the link, and a link to a directory has a directory row (#164).
+            if !abs.is_file() && !abs.is_symlink() {
                 continue;
             }
             // Buried under collapsed directories: expanding is the one mutation the jump is

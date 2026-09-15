@@ -482,3 +482,42 @@ fn jump_from_an_unchanged_file_goes_to_the_next_changed_one_in_path_order() {
     assert_eq!(model.select_changed(false, &set), Some(false));
     assert_eq!(selected(&model).as_deref(), Some("a.rs"), "backward");
 }
+
+// #164: a changed symlink to a directory is a Dir row in the full tree. The jump must still land on
+// it (it did while the link was a File row), not skip it because its target is not a file.
+#[cfg(unix)]
+#[test]
+fn lands_on_a_changed_symlink_that_is_a_directory_row() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new();
+    fs::create_dir_all(dir.path().join("real")).unwrap();
+    fs::write(dir.path().join("real/inner.rs"), "x").unwrap();
+    fs::write(dir.path().join("a.rs"), "x").unwrap();
+    symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+    let set = changed(&["a.rs", "link"]);
+    let mut model = TreeModel::new(dir.path());
+    model.set_status(&set);
+    let link_row = model
+        .visible_nodes()
+        .into_iter()
+        .find(|n| n.path == dir.path().join("link"))
+        .expect("link row");
+    assert_eq!(
+        link_row.kind,
+        NodeKind::Dir,
+        "precondition: the link is a directory row"
+    );
+
+    let mut landed = Vec::new();
+    for _ in 0..2 {
+        model
+            .select_changed(true, &set)
+            .expect("a changed row is selectable");
+        landed.extend(selected(&model));
+    }
+    assert!(
+        landed.iter().any(|n| n == "link"),
+        "two forward jumps visit both changed rows, the link included: {landed:?} in {:?}",
+        rows(&model)
+    );
+}

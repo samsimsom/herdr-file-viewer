@@ -49,10 +49,15 @@ pub(crate) fn walk_builder(root: &Path, is_git_repo: bool) -> WalkBuilder {
 /// `~/.ssh`) is never walked, and no name from beyond the root is listed. An unresolvable link
 /// (dangling, a loop the OS refuses) is not followed.
 pub(crate) fn is_in_root_symlink(root: &Path, path: &Path) -> bool {
-    let (Ok(target), Ok(root)) = (path.canonicalize(), root.canonicalize()) else {
-        return false;
-    };
-    target.starts_with(root)
+    root.canonicalize()
+        .is_ok_and(|root| is_within_canonical_root(&root, path))
+}
+
+/// [`is_in_root_symlink`] against a root the caller already canonicalized, so a caller that asks
+/// about many entries (the tree, on every frame) resolves the root once instead of per entry.
+pub(crate) fn is_within_canonical_root(canon_root: &Path, path: &Path) -> bool {
+    path.canonicalize()
+        .is_ok_and(|target| target.starts_with(canon_root))
 }
 
 /// Return every file under `root` as a root-relative `String`, respecting `.gitignore`.
