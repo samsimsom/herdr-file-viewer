@@ -467,3 +467,39 @@ fn follow_symlinks_browses_a_link_whose_target_is_outside_the_root() {
         "off again: the out-of-root link is a leaf"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_never_follows_a_link_to_the_root_or_an_ancestor_of_it() {
+    // A link back up (`..`, `~`, `/`) would list the root inside itself and hand the finder a walk
+    // of the whole filesystem. The opt-in follows links sideways, never up.
+    use herdr_file_viewer::tree::NodeKind;
+    use std::os::unix::fs::symlink;
+    let outer = TempDir::new();
+    let root = outer.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(outer.path().join("sibling.txt"), "s").unwrap();
+    let data = TempDir::new();
+    symlink(outer.path(), root.join("up")).unwrap();
+    symlink("/", root.join("slash")).unwrap();
+    symlink(data.path(), root.join("data")).unwrap();
+
+    let mut model = TreeModel::new(&root);
+    model.set_follow_symlinks(true);
+    let nodes = model.visible_nodes();
+    assert_eq!(
+        node(&nodes, "data").kind,
+        NodeKind::Dir,
+        "a sideways link is followed"
+    );
+    assert_eq!(
+        node(&nodes, "up").kind,
+        NodeKind::File,
+        "a link to an ancestor is a leaf"
+    );
+    assert_eq!(
+        node(&nodes, "slash").kind,
+        NodeKind::File,
+        "a link to / is a leaf"
+    );
+}

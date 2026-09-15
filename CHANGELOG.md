@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
-- `follow_symlinks`: opt in to browsing symlinks that point outside the root — a data folder linked beside the repo expands, `f` finds its files, and they preview. Off by default. (#164) → [configuration](docs/configuration.md)
+- `follow_symlinks`: opt in to browsing directory symlinks that point outside the root — a data folder linked beside the repo expands, `f` finds its files, and they preview. A link back to the root or an ancestor is never followed, and a file link reads only inside the root or a followed folder. Off by default. (#164) → [configuration](docs/configuration.md)
 
 ### Fixed
 - A symlink to a directory inside the root is now a browsable directory (it was listed as a file you could not expand), and `f` finds the files under it. Links that resolve outside the root are still never followed. A changed symlinked directory keeps its git status marker, and `]`/`[` stop on it. (#164) → [usage](docs/usage.md#the-tree)

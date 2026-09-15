@@ -1509,6 +1509,52 @@ mod tests {
         );
     }
 
+    /// End-to-end wiring: `eff.follow_symlinks` → `LiveContent.follow_symlinks` →
+    /// `render::classify_following`, so a file behind an out-of-root directory link previews only
+    /// with the opt-in on.
+    #[cfg(unix)]
+    #[test]
+    fn livecontent_threads_follow_symlinks_into_the_content_reader() {
+        use std::os::unix::fs::symlink;
+        let root = tmp("follow-wiring-root");
+        let data = tmp("follow-wiring-data");
+        std::fs::write(data.join("note.txt"), "through the link\n").unwrap();
+        symlink(&data, root.join("data")).unwrap();
+        let file = root.join("data/note.txt");
+        let render = |follow_symlinks: bool| {
+            let content = LiveContent {
+                root: root.clone(),
+                renderers: Renderers {
+                    markdown: vec!["cat".into()],
+                    diff: vec!["cat".into()],
+                    full_diff: vec!["cat".into()],
+                    syntax: vec!["cat".into()],
+                    timeout: Duration::from_secs(5),
+                },
+                caps: Caps::default(),
+                follow_symlinks,
+            };
+            flatten_content(&content.render_at_width(
+                &file,
+                ViewMode::SyntaxContent,
+                None,
+                None,
+                None,
+                DiffRenderMode::default(),
+            ))
+        };
+        assert!(
+            render(true).contains("through the link"),
+            "opt-in on reads it"
+        );
+        assert!(
+            !render(false).contains("through the link"),
+            "off stays AC-N5"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     #[cfg(unix)]
     fn flatten_content(r: &RenderResult) -> String {
         r.content

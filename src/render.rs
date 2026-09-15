@@ -130,10 +130,11 @@ pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
     classify_following(root, path, caps, false)
 }
 
-/// [`classify`], with the `follow_symlinks` opt-in. When `true`, a path that lies **lexically**
-/// under `root` (no `..`, not above it) is read even when a symlink along it resolves outside the
-/// root — the tree only ever hands out such paths for links the user opted to follow. A `..` path
-/// and a non-regular target are refused exactly as before.
+/// [`classify`], with the `follow_symlinks` opt-in. When `true`, a path that lies lexically under
+/// `root` (no `..`) is read even when it resolves outside the root, provided every symlink on the
+/// way is one the tree and the finder would follow too ([`crate::index::every_symlink_admitted`]):
+/// directory links that do not point back up at the root or an ancestor, and file links that stay
+/// inside an allowed root. A `..` path and a non-regular target are refused exactly as before.
 pub fn classify_following(root: &Path, path: &Path, caps: Caps, follow_symlinks: bool) -> Prepared {
     let Ok(canon_root) = root.canonicalize() else {
         return Prepared::Unavailable {
@@ -161,11 +162,8 @@ pub fn classify_following(root: &Path, path: &Path, caps: Caps, follow_symlinks:
             return Prepared::Unavailable { reason };
         }
     };
-    let lexically_within = path.starts_with(root)
-        && !path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir));
-    let admitted = canonical.starts_with(&canon_root) || (follow_symlinks && lexically_within);
+    let admitted = canonical.starts_with(&canon_root)
+        || (follow_symlinks && crate::index::every_symlink_admitted(root, &canon_root, path, true));
     if !admitted {
         return Prepared::Unavailable {
             reason: UnavailableReason::OutsideViewedRoot,
@@ -1051,7 +1049,9 @@ mod tests {
 
         assert_eq!(
             classify(&root, &through, Caps::default()),
-            Prepared::Binary,
+            Prepared::Unavailable {
+                reason: UnavailableReason::OutsideViewedRoot
+            },
             "default stays AC-N5"
         );
         match classify_following(&root, &through, Caps::default(), true) {
@@ -1062,18 +1062,69 @@ mod tests {
             .join("data/../../")
             .join(outside.file_name().unwrap())
             .join("note.md");
+        // Never admitted; the reason is `Missing` rather than `OutsideViewedRoot` because
+        // `data/../..` climbs above the link target, so the path does not resolve at all.
         assert_eq!(
             classify_following(&root, &dotdot, Caps::default(), true),
-            Prepared::Binary,
+            Prepared::Unavailable {
+                reason: UnavailableReason::Missing
+            },
             "a `..` path is never admitted"
         );
         assert_eq!(
             classify_following(&root, &root.join("data"), Caps::default(), true),
-            Prepared::Binary,
+            Prepared::Unavailable {
+                reason: UnavailableReason::NotRegular
+            },
             "a directory is still not a regular file"
         );
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+
+    // The opt-in admits directory links, not every link: a FILE link may leave the root only to stay
+    // inside a folder reached through an admitted directory link, and a link back up to the root or
+    // an ancestor of it (`..`, `~`, `/`) is never followed (council review 2026-09-15, #164).
+    #[cfg(unix)]
+    #[test]
+    fn follow_symlinks_never_reads_through_an_escaping_file_link_or_a_link_to_an_ancestor() {
+        use std::os::unix::fs::symlink;
+        let outer = unique_dir("outer");
+        let root = outer.join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(outer.join("above.txt"), "ABOVE").unwrap();
+        let data = unique_dir("data");
+        let secret = unique_dir("secret");
+        fs::write(data.join("note.md"), "NOTE").unwrap();
+        fs::write(secret.join("id"), "SECRET").unwrap();
+        symlink(&data, root.join("data")).unwrap();
+        symlink(data.join("note.md"), data.join("alias.md")).unwrap();
+        symlink(secret.join("id"), data.join("leak")).unwrap();
+        symlink(secret.join("id"), root.join("key")).unwrap();
+        symlink(&outer, root.join("up")).unwrap();
+
+        let read = |p: &Path| match classify_following(&root, p, Caps::default(), true) {
+            Prepared::Full { text } => Some(text),
+            _ => None,
+        };
+        assert!(
+            read(&root.join("data/alias.md")).is_some_and(|t| t.contains("NOTE")),
+            "a file link that stays inside the followed folder is read"
+        );
+        assert_eq!(read(&root.join("key")), None, "a file link out of the root");
+        assert_eq!(
+            read(&root.join("data/leak")),
+            None,
+            "a file link out of the followed folder"
+        );
+        assert_eq!(
+            read(&root.join("up/above.txt")),
+            None,
+            "a path through a link to an ancestor of the root"
+        );
+        for d in [&outer, &data, &secret] {
+            fs::remove_dir_all(d).ok();
+        }
     }
 
     #[cfg(unix)]

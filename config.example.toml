@@ -85,9 +85,13 @@
 # Follow a symlink that lives inside the root even when it points OUTSIDE it --
 # e.g. a `data -> ~/Drive/project-data` folder kept beside the repo. Off, only
 # links that resolve inside the root expand, and nothing beyond the root is
-# listed or read. On, such a link expands, `f` finds the files under it, and
-# its files preview; paths are still shown under the link. Only turn it on for
-# roots you trust: a hostile repo could point a link at `~/.ssh` or `/`.
+# listed or read. On, such a directory link expands, `f` finds the files under
+# it, and they preview; paths are still shown under the link. A link to the
+# root or one of its ancestors (`..`, `~`, `/`) is never followed, and a FILE
+# link is read only if it stays inside the root or inside a followed folder.
+# It applies to every root you open, and a hostile repo could still point a
+# directory link at a folder like `~/.ssh`: only turn it on if you trust the
+# roots you browse.
 # A startup setting -- no runtime key toggles it. Default:
 #follow_symlinks = false
 

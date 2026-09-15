@@ -235,3 +235,41 @@ fn follow_symlinks_indexes_out_of_root_links_under_the_link_path() {
         "a loop is not descended: {paths:?}"
     );
 }
+
+// (k) `follow_symlinks = true` stays bounded and never reads out through a file link: a link to an
+// ancestor of the root is not walked, and a file link is indexed only when it stays inside the root
+// or inside a folder reached through an admitted directory link.
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_skips_ancestor_links_and_file_links_leaving_every_allowed_root() {
+    use std::os::unix::fs::symlink;
+    let outer = common::TempDir::new();
+    let root = outer.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(outer.path().join("sibling.txt"), "").unwrap();
+    symlink(outer.path(), root.join("up")).unwrap();
+
+    let data = common::TempDir::new();
+    let secret = common::TempDir::new();
+    fs::write(data.path().join("note.md"), "").unwrap();
+    fs::write(secret.path().join("id"), "").unwrap();
+    symlink(data.path(), root.join("data")).unwrap();
+    symlink(data.path().join("note.md"), data.path().join("alias.md")).unwrap();
+    symlink(secret.path().join("id"), data.path().join("leak")).unwrap();
+    symlink(secret.path().join("id"), root.join("key")).unwrap();
+
+    let paths = index::build_following(&root, true);
+    for want in ["data/note.md", "data/alias.md"] {
+        assert!(paths.iter().any(|p| p == want), "{want} indexed: {paths:?}");
+    }
+    for leak in ["key", "data/leak"] {
+        assert!(
+            !paths.iter().any(|p| p == leak),
+            "{leak} not indexed: {paths:?}"
+        );
+    }
+    assert!(
+        paths.iter().all(|p| !p.starts_with("up/")),
+        "no walk through a link to an ancestor: {paths:?}"
+    );
+}

@@ -45,6 +45,15 @@ collaborator handed you. Its security posture is built around that.
   flag-like id can't option-inject the herdr CLI). Paths are passed to `git` as raw `OsStr`
   arguments after a within-root check (no traversal above the root, no arbitrary reads).
 
+- **Symlinks → one containment rule.** By default a symlink is listed as browsable, indexed, or
+  read only when it resolves inside the root. The `follow_symlinks` config key is an explicit,
+  global opt-in that also follows directory links pointing elsewhere (a data folder kept beside a
+  repository). Even then a link to the root or one of its ancestors is never followed, a file link
+  is read only when it stays inside the root or a followed folder, and `..` paths are refused. The
+  tree, the finder, and the content reader share this one rule, so none of them is a weaker door.
+  Leave the opt-in off when browsing untrusted repositories: a hostile repository can still point a
+  directory link at a sensitive folder.
+
 - **Resource bounds.** File reads and captured renderer/diff output are size-capped, and external
   renderers run under a wall-clock timeout, so a huge or slow input degrades gracefully rather
   than hanging or exhausting memory.

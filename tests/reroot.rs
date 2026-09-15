@@ -1543,3 +1543,43 @@ fn picker_lists_only_this_repos_worktrees() {
         );
     }
 }
+
+/// `follow_symlinks` is a session preference: a re-root builds a fresh tree, and the finder reads
+/// the controller's copy, so both must keep following an out-of-root data link at the new root.
+#[cfg(unix)]
+#[test]
+fn re_root_carries_follow_symlinks_into_the_finder() {
+    use std::os::unix::fs::symlink;
+    let a = TempDir::new();
+    let b = TempDir::new();
+    let data = TempDir::new();
+    std::fs::write(a.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(data.path().join("note.md"), "n\n").unwrap();
+    symlink(data.path(), b.path().join("data")).unwrap();
+
+    let components = Components {
+        providers: fake_factory(),
+        editor: Box::new(FakeEditor),
+        clipboard: Box::new(FakeClipboard),
+        renderers: None,
+    };
+    let mut ctrl = Controller::new(
+        common::resolved(a.path().to_path_buf(), false),
+        Baseline::Head,
+        components,
+    );
+    ctrl.apply_follow_symlinks(true);
+    ctrl.re_root(b.path());
+    assert_eq!(
+        common::canon(ctrl.root()),
+        common::canon(b.path()),
+        "re-rooted to b"
+    );
+
+    ctrl.handle(Intent::OpenFinder);
+    let candidates = ctrl.finder_candidates();
+    assert!(
+        candidates.iter().any(|c| c == "data/note.md"),
+        "the finder at the new root still follows the data link: {candidates:?}"
+    );
+}

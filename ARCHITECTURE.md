@@ -30,7 +30,7 @@ is unit-testable with stubs.
 | `git` | Read-only git queries: status, baseline selection, changed-set, per-file diff. The **only** module that shells out to `git`, and only with read-only subcommands. |
 | `herdr` | The herdr CLI seam (`$HERDR_BIN_PATH`): read-only queries (list git worktrees / which workspaces have an active agent) plus a best-effort host **layout** command (`pane zoom --current --on`/`--off`, the `Z` full-screen toggle). Neither touches file or git state; an absent or failing herdr degrades gracefully (git-only picker; in-pane zoom only). |
 | `worktree` | Enumerate the repo's git worktrees (`git worktree list --porcelain`) and overlay herdr's agent-active workspace + per-row agent status, feeding the switch-worktree picker. |
-| `tree` | The rooted, `.gitignore`-aware file tree: filters (gitignored, changed-only, hidden/dotfiles), cursor, expansion, status markers, and the `]` / `[` changed-file jump. Optionally folds a chain of single-child directories into one row (`compact_dirs`). A folded row has to look inside a **collapsed** directory, which the tree never opens otherwise, so foldability is answered by a two-entry probe rather than a listing and the answer is memoized — re-probed wherever the controller re-reads git. Listings stay uncached, so a compacted frame reads exactly the directories an uncompacted one does. |
+| `tree` | The rooted, `.gitignore`-aware file tree: filters (gitignored, changed-only, hidden/dotfiles), cursor, expansion, status markers, and the `]` / `[` changed-file jump. Optionally folds a chain of single-child directories into one row (`compact_dirs`). A folded row has to look inside a **collapsed** directory, which the tree never opens otherwise, so foldability is answered by a two-entry probe rather than a listing and the answer is memoized — re-probed wherever the controller re-reads git. Listings stay uncached, so a compacted frame reads exactly the directories an uncompacted one does. A symlink row is a directory only when the shared `index::admit_symlink` rule admits its target; that per-link verdict and the canonical root are memoized and cleared with the fold shapes. |
 | `view_policy` | A pure decision: which view mode a file gets (deleted → diff; other changed files → configured diff or normal-file preference; markdown → rendered; else → syntax content) and the cycle order. |
 | `preview` | Shared active/pinned preview values: an immutable applied document with captured origin identity, plus separate mutable interaction state (viewport, scroll, search, and paging) for each displayed preview. |
 | `preview_layout` | Pure responsive geometry for the tree, active preview, and pinned preview. It keeps the preview divider distinct from the tree divider, applies the 20–80% pinned share from the right edge, and signals when a pin misses its 40-column floor so the no-pin tree/active geometry remains intact. |
@@ -116,6 +116,12 @@ Four untrusted inputs are handled defensively (see [SECURITY.md](SECURITY.md)):
 3. **The herdr-injected context** is parsed defensively and degrades to a minimal default.
 4. **Official remote-notice documents** come only from fixed HTTPS sources, stay bounded and
    fail-silent, and pass through terminal-control neutralization before display.
+
+Symlinks inside the browsed root cross the root boundary through **one** rule,
+`index::admit_symlink`, shared by the tree, the finder index, and the content reader: a link that
+resolves inside the root is always followed; one that resolves outside it only under the
+`follow_symlinks` opt-in, never when it points at the root or an ancestor, and a file link only when
+it stays inside an allowed root.
 
 ## Tests
 

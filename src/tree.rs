@@ -5,7 +5,7 @@
 //! its root — no node ever escapes it (AC-N5) — and reads only, never writes (AC-N1).
 
 use crate::git::Status;
-use crate::index::{is_within_canonical_root, walk_builder};
+use crate::index::{admit_symlink, walk_builder};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -252,8 +252,10 @@ impl TreeModel {
         self.symlink_dirs.get_mut().clear();
     }
 
-    /// Whether the symlink at `path` is a browsable directory: it resolves to a directory inside the
-    /// canonical root (#164, AC-N5). Memoized in [`symlink_dirs`](Self::symlink_dirs).
+    /// Whether the symlink at `path` is a browsable directory: it resolves to a directory the shared
+    /// rule admits — inside the canonical root, or outside it under `follow_symlinks` but never the
+    /// root or an ancestor ([`admit_symlink`], #164, AC-N5). Memoized in
+    /// [`symlink_dirs`](Self::symlink_dirs).
     fn symlink_is_browsable_dir(&self, path: &Path) -> bool {
         let cached = self.symlink_dirs.borrow().get(path).copied();
         if let Some(hit) = cached {
@@ -264,13 +266,8 @@ impl TreeModel {
                 .canonicalize()
                 .unwrap_or_else(|_| self.root.clone())
         });
-        // `follow_symlinks` admits any resolvable link; otherwise only one that stays in the root.
-        let verdict = path.is_dir()
-            && if self.follow_symlinks {
-                path.canonicalize().is_ok()
-            } else {
-                is_within_canonical_root(canon_root, path)
-            };
+        let verdict =
+            path.is_dir() && admit_symlink(&self.root, canon_root, path, self.follow_symlinks);
         self.symlink_dirs
             .borrow_mut()
             .insert(path.to_path_buf(), verdict);

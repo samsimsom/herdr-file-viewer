@@ -138,11 +138,19 @@ but not how much of a very large *diff* is (a diff past that bound is shown up t
 
 `follow_symlinks` widens what the viewer reads. By default a symlink to a directory expands only when it
 resolves **inside** the root, and a link that points elsewhere stays a leaf row whose contents are never
-listed or read. With it on, a link that lives inside the root is followed wherever it points: it
-expands, `f` indexes the files under it, and those files preview. Rows keep the link's path
-(`data/notes.md`), a `..` path is still refused, and a symlinked directory still never folds into a
-`compact_dirs` chain. Keep it off for roots you do not trust — a hostile repository can point a link
-at `~/.ssh`.
+listed or read. With it on, a **directory** link that lives inside the root is followed out of it:
+it expands, `f` indexes the files under it, and those files preview. Rows keep the link's path
+(`data/notes.md`). Three limits stay in place:
+
+- a link to the root or one of its ancestors (`..`, `~`, `/`) is never followed, so the tree cannot
+  contain itself and `f` never walks your whole disk;
+- a **file** link is read only when it stays inside the root or inside a followed folder —
+  `data/alias.md -> data/note.md` previews, `key -> ~/.ssh/id_rsa` does not;
+- a `..` path is refused, and a symlinked directory never folds into a `compact_dirs` chain.
+
+The tree, `f`, and the content pane apply the same rule. The key is global — it applies to every root
+you open — so keep it off if you browse repositories you do not trust: a hostile one can still point
+a directory link at a folder like `~/.ssh`.
 
 `compact_dirs` changes the tree's **shape**, not what it shows. With it on, a chain of directories
 that each hold nothing but one subdirectory is drawn as a single row — `src/main/java/br/com` instead

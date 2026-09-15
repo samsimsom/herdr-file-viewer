@@ -6,7 +6,7 @@
 //! and the entire `.git` subtree is pruned via `filter_entry`.
 
 use ignore::WalkBuilder;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// The shared base for the crate's two gitignore-aware walks — this File Index and the Tree
 /// Model (`tree.rs`). Sets the hermetic policy both share so it lives in one place: honor an
@@ -40,36 +40,92 @@ pub(crate) fn walk_builder(root: &Path, is_git_repo: bool) -> WalkBuilder {
     builder
 }
 
-/// Whether `path` — an entry a walk found under `root` — is a symlink whose resolved target stays
-/// **inside** the canonical `root`: the one kind of symlink either walk follows (#164).
+/// The single symlink admission rule the tree, the finder index and the content reader share (#164).
 ///
-/// The containment rule is the one `render::classify` and `git::is_within_root` already apply to
-/// content reads (AC-N5), so the tree, the finder and the content pane agree on what is in bounds:
-/// a link into the repo is browsable, a link out of it (a data folder on another volume, `/`,
-/// `~/.ssh`) is never walked, and no name from beyond the root is listed. An unresolvable link
-/// (dangling, a loop the OS refuses) is not followed.
-pub(crate) fn is_in_root_symlink(root: &Path, path: &Path) -> bool {
-    root.canonicalize()
-        .is_ok_and(|root| is_within_canonical_root(&root, path))
-}
-
-/// [`is_in_root_symlink`] against a root the caller already canonicalized, so a caller that asks
-/// about many entries (the tree, on every frame) resolves the root once instead of per entry.
-pub(crate) fn is_within_canonical_root(canon_root: &Path, path: &Path) -> bool {
-    path.canonicalize()
-        .is_ok_and(|target| target.starts_with(canon_root))
-}
-
-/// Whether a walk under `root` may follow the symlink at `path`: always when the link resolves inside
-/// the root ([`is_in_root_symlink`]); with the opt-in `follow_symlinks` config key, also when it
-/// resolves anywhere at all. The link itself still lives under the root, so every listed path stays
-/// root-relative — only the bytes behind it come from elsewhere. A dangling link is never followed.
-pub(crate) fn may_follow_symlink(root: &Path, path: &Path, follow_symlinks: bool) -> bool {
-    if follow_symlinks {
-        path.canonicalize().is_ok()
-    } else {
-        is_in_root_symlink(root, path)
+/// `link` is a symlink at or below `root`, and `canon_root` is `root` canonicalized once by the
+/// caller (the tree asks about many entries, on every frame).
+///
+/// - A link that resolves **inside** the canonical root is always admitted: the containment rule
+///   `render::classify` and `git::is_within_root` already apply to content reads (AC-N5).
+/// - A link that resolves outside it is admitted only with the `follow_symlinks` opt-in, and then:
+///   - a **directory** link unless its target is the root or one of the root's ancestors (`..`,
+///     `~`, `/`). Following one of those would list the root inside itself and hand the finder a
+///     walk of the whole filesystem;
+///   - a **file** link only when its target stays inside an *allowed root*: the canonical root, or
+///     the canonical target of a directory link on the file's own path. So `data/alias.md ->
+///     data/note.md` reads, while `key -> ~/.ssh/id_rsa` and `data/leak -> ~/.ssh/id_rsa` never do.
+/// - A dangling or otherwise unresolvable link is never admitted.
+///
+/// The link itself lives under the root, so every listed path stays root-relative; only the bytes
+/// behind an admitted link come from elsewhere.
+pub(crate) fn admit_symlink(
+    root: &Path,
+    canon_root: &Path,
+    link: &Path,
+    follow_symlinks: bool,
+) -> bool {
+    let Ok(target) = link.canonicalize() else {
+        return false;
+    };
+    if target.starts_with(canon_root) {
+        return true;
     }
+    if !follow_symlinks {
+        return false;
+    }
+    if target.is_dir() {
+        return !canon_root.starts_with(&target);
+    }
+    link.parent().is_some_and(|dir| {
+        followed_dir_targets(root, dir)
+            .iter()
+            .any(|allowed| target.starts_with(allowed))
+    })
+}
+
+/// The canonical targets of the directory symlinks on `dir`'s path below `root`, outermost first:
+/// the extra allowed roots a file link inside `dir` may resolve into ([`admit_symlink`]).
+fn followed_dir_targets(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let Ok(rel) = dir.strip_prefix(root) else {
+        return Vec::new();
+    };
+    let mut prefix = root.to_path_buf();
+    let mut targets = Vec::new();
+    for component in rel.components() {
+        prefix.push(component);
+        if prefix.is_symlink()
+            && let Ok(target) = prefix.canonicalize()
+        {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+/// Whether `path` lies lexically below `root` (only normal components, so no `..`) and every
+/// symlink along it, outermost first, is admitted by [`admit_symlink`]. The content reader's check:
+/// a path handed over by the tree, the finder or a launch open target reads only when neither walk
+/// would have refused a link on the way to it.
+pub(crate) fn every_symlink_admitted(
+    root: &Path,
+    canon_root: &Path,
+    path: &Path,
+    follow_symlinks: bool,
+) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut prefix = root.to_path_buf();
+    for component in rel.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return false;
+        }
+        prefix.push(component);
+        if prefix.is_symlink() && !admit_symlink(root, canon_root, &prefix, follow_symlinks) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Return every file under `root` as a root-relative `String`, respecting `.gitignore`.
@@ -81,8 +137,8 @@ pub(crate) fn may_follow_symlink(root: &Path, path: &Path, follow_symlinks: bool
 /// - The `.git` subtree is pruned entirely — AC-14.
 /// - Directories are not included, only files — AC-15.
 /// - Every returned path is relative to `root` (no leading `/`, no `..`) — AC-N5.
-/// - Symlinks are followed only when they resolve inside `root` ([`is_in_root_symlink`]); the
-///   walker's own loop detection drops a link back to an ancestor, so the walk stays bounded.
+/// - Symlinks are followed only when they resolve inside `root` ([`admit_symlink`]); the walker's
+///   own loop detection drops a link back to an ancestor, so the walk stays bounded.
 /// - Each call performs a fresh walk; no cache — AC-18.
 /// - Works in non-git directories without error (`require_git(false)`) — AC-19.
 /// - Read-only: no filesystem or git mutations — AC-N1, AC-N2.
@@ -97,8 +153,9 @@ pub fn build_scoped(root: &Path, is_git_repo: bool) -> Vec<String> {
     build_scoped_following(root, is_git_repo, false)
 }
 
-/// [`build`], with the `follow_symlinks` opt-in: when `true`, a symlink under `root` is followed
-/// wherever it resolves ([`may_follow_symlink`]). Paths are still reported under the link.
+/// [`build`], with the `follow_symlinks` opt-in: when `true`, a directory link under `root` is
+/// followed out of the root unless it points back up at the root or an ancestor, and a file link
+/// only when it stays inside an allowed root ([`admit_symlink`]). Paths are reported under the link.
 pub fn build_following(root: &Path, follow_symlinks: bool) -> Vec<String> {
     build_scoped_following(root, false, follow_symlinks)
 }
@@ -112,6 +169,7 @@ pub fn build_scoped_following(
 ) -> Vec<String> {
     let mut builder = walk_builder(root, is_git_repo);
     let bound = root.to_path_buf();
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     builder
         .hidden(false) // include dotfiles (AC-17 depends on the index NOT hiding dotfiles)
         .git_ignore(true)
@@ -119,8 +177,9 @@ pub fn build_scoped_following(
         .follow_links(true) // #164: a symlinked directory's files are findable…
         .filter_entry(move |e| {
             e.file_name() != ".git" // prune entire .git subtree — AC-14
-                // …but only when the link stays inside the root (AC-N5), unless opted out.
-                && (!e.path_is_symlink() || may_follow_symlink(&bound, e.path(), follow_symlinks))
+                // …but only links the shared rule admits (AC-N5 unless opted in, #164).
+                && (!e.path_is_symlink()
+                    || admit_symlink(&bound, &canon_root, e.path(), follow_symlinks))
         });
 
     builder
